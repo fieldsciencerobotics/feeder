@@ -1,8 +1,8 @@
 #include "Plunger.h"
 #include "HardwareSerial.h"
 
-int const Plunger::down_pulse = 1200;
-int const Plunger::up_pulse = 1800;
+int const Plunger::down_pulse = 2300;
+int const Plunger::up_pulse = 1000;
 int const Plunger::period = 20000;
 
 Plunger::Plunger()

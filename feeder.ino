@@ -22,7 +22,7 @@ int endstop_back_pin = 0;
 int fsr_meat_pin = 12;
 int fsr_perch_pin = 11;
 
-const int MEAT_SENSED_THRESHOLD = 1000;
+const int MEAT_SENSED_THRESHOLD = 200;
 const int MEAT_CLEARED_THRESHOLD = 100;
 const int PERCH_TRIGGERED_THRESHOLD = 500;
 const int PERCH_CLEAR_THRESHOLD = 200;
@@ -90,6 +90,7 @@ void setup() {
   d2.attach(9, 10000, 5600);
   d3.attach(8, 10000, 10000);
   plunger.attach(2);
+  plunger.pull_up(2);
       
   //Setup timer for ADC call
   TA1CCR0 =  12500; //10hz
@@ -252,12 +253,15 @@ __interrupt void Timer1_A0 (void)
       clearing_meat = false;
       meat_dropped = true;
       swap.getRegister(REGI_DROP_MEAT_STATE)->getData();
+      plunger.pull_up();
       Serial.println("Meat cleared");
     }
     else
     {
       Serial.println("Attempting to clear meat");
-      plunger.push_down(1);
+      plunger.push_down(2);
+      plunger.pull_up(3);
+      plunger.push_down(2);
       plunger.pull_up(3);
     }
   }

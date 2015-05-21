@@ -27,7 +27,7 @@ void PololuStepper::attach(int ms1_pin, int ms2_pin, int ms3_pin, int step_pin, 
   digitalWrite(this->ms3_pin, HIGH);
   digitalWrite(PololuStepper::step_pin, LOW);
   digitalWrite(this->dir_pin, LOW);
-}
+} 
 
 // Timer A0 interrupt service routine
 #pragma vector=TIMER0_A0_VECTOR
