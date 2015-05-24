@@ -112,8 +112,9 @@ const void set_push_meat(byte rId, byte *junk)
 {
   Serial.println("Starting to push meat");  
   memcpy(regTable[rId]->value, junk, sizeof(regTable[rId]->value));
+  int val = digitalRead(endstop_front_pin); //to check border case of push meat when already fuly forward
   
-  if(!pushing_meat and !resetting)
+  if(!pushing_meat and !resetting and !val)
   {    
     pushing_meat = true;
     clearing_meat = false;
@@ -130,8 +131,9 @@ const void set_reset(byte rId, byte *junk)
 {  
   Serial.println("Resetting");
   memcpy(regTable[rId]->value, junk, sizeof(regTable[rId]->value));
+  int val = digitalRead(endstop_back_pin); //to check border case of reset when already reset
   
-  if(!resetting and !pushing_meat)
+  if(!resetting and !pushing_meat and !val)
   {    
     resetting = true;
     device_reset = false;
