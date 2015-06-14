@@ -24,8 +24,8 @@ int fsr_perch_pin = 11;
 
 const int MEAT_SENSED_THRESHOLD = 200;
 const int MEAT_CLEARED_THRESHOLD = 100;
-const int PERCH_TRIGGERED_THRESHOLD = 500;
-const int PERCH_CLEAR_THRESHOLD = 200;
+const int PERCH_TRIGGERED_THRESHOLD = 2500;
+const int PERCH_CLEAR_THRESHOLD = 2000;
 
 PololuStepper stepper;
 Plunger plunger;
