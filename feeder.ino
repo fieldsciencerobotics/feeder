@@ -1,3 +1,27 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2015 Field Science Robotics
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 #include <Arduino.h>
 #include <cc430f5137.h>
 #include "HardwareSerial.h"
@@ -9,23 +33,31 @@
 #include "regtable.h"
 #include "product.h"
 #include "swap.h"
-
-bool perch_triggered = false;
-bool pushing_meat = false;
-bool clearing_meat = false;
-bool resetting = false;
-bool meat_dropped = false;
-bool device_reset = false;
+#include "register.h"
+#include "actions.h"
+#include "byteops.h"
 
 int endstop_front_pin = 1;
 int endstop_back_pin = 0;
 int fsr_meat_pin = 12;
 int fsr_perch_pin = 11;
 
-const int MEAT_SENSED_THRESHOLD = 200;
-const int MEAT_CLEARED_THRESHOLD = 100;
-const int PERCH_TRIGGERED_THRESHOLD = 2500;
-const int PERCH_CLEAR_THRESHOLD = 2000;
+int MEAT_LOADED_THRESH = 200;
+int MEAT_DROPPED_DIFF = 100;
+int PERCH_OCCUPIED_THRESH = 2000;
+int PERCH_VACANT_DIFF = 2500;
+int MAX_MEAT_PIECES = 12;
+int MOTOR_DIRECTION = 1;
+
+
+const float MILLIVOLT = 1000.0;
+
+PerchEvent perch_state = PerchVacant;
+ActionEvent feeder_state = Stopped;
+HeartBeat hb_state = Init;
+uint8_t meat_pieces_left;
+int mpl_address = 0;
+int mpl_address_max = 128;
 
 PololuStepper stepper;
 Plunger plunger;
@@ -33,48 +65,8 @@ VoltageDivider d1;
 VoltageDivider d2;
 VoltageDivider d3;
 
-
-DECLARE_COMMON_CALLBACKS()
-DEFINE_COMMON_REGISTERS()
-
-//Define custom registers
-static byte dt_drop_meat[1];
-REGISTER reg_drop_meat(dt_drop_meat, sizeof(dt_drop_meat), NULL, &set_push_meat);
-
-static byte dt_reset[1];
-REGISTER reg_reset(dt_reset, sizeof(dt_reset), NULL, &set_reset);
-
-static byte dt_drop_meat_state[1];
-REGISTER reg_drop_meat_state(dt_drop_meat_state, sizeof(dt_drop_meat_state), &updt_drop_meat_state, NULL);
-
-static byte dt_reset_state[1];
-REGISTER reg_reset_state(dt_reset_state, sizeof(dt_reset_state), &updt_reset_state, NULL);
-
-static byte dt_req_batt_volt[1];
-REGISTER reg_req_batt_volt(dt_req_batt_volt, sizeof(dt_req_batt_volt), NULL, &set_req_batt_volt);
-                      
-static byte dt_batt_volt[6];
-REGISTER reg_batt_volt(dt_batt_volt, sizeof(dt_batt_volt), &updt_batt_volt, NULL);
-
-static byte dt_perch_triggered[1];
-REGISTER reg_perch_triggered(dt_perch_triggered, sizeof(dt_perch_triggered), &updt_perch_triggered, NULL);
-                     
-DECLARE_REGISTERS_START()
-  &reg_drop_meat,  // 11
-  &reg_reset,  // 12
-  &reg_drop_meat_state, //13
-  &reg_reset_state, //14
-  &reg_req_batt_volt, //15
-  &reg_batt_volt,  // 16
-  &reg_perch_triggered,  // 17
-DECLARE_REGISTERS_END()
-
-DEFINE_COMMON_CALLBACKS()
-
-
 void setup() {
   WDTCTL = WDTPW + WDTHOLD; //Stop watchdog timer
-  Serial.begin(9600);
   
   //Setup end stops
   pinMode(endstop_front_pin, INPUT);
@@ -83,9 +75,27 @@ void setup() {
   //Setup interupts
   attachInterrupt(endstop_front_pin, endstop_front_high, RISING);
   attachInterrupt(endstop_back_pin, endstop_back_high, RISING);
+    
+  swap.init();
+  swap.getRegister(REGI_PRODUCTCODE)->getData();
+
+  //Load default values from info memory
+  reg_to_int(swap.getRegister(REGI_MEAT_LOADED_THRESH), MEAT_LOADED_THRESH);
+  reg_to_int(swap.getRegister(REGI_MEAT_DROPPED_DIFF), MEAT_DROPPED_DIFF);
+  reg_to_int(swap.getRegister(REGI_PERCH_OCCUPIED_THRESH), PERCH_OCCUPIED_THRESH);
+  reg_to_int(swap.getRegister(REGI_PERCH_VACANT_DIFF), PERCH_VACANT_DIFF);
+  reg_to_int(swap.getRegister(REGI_MOTOR_DIRECTION), MOTOR_DIRECTION);
+  reg_to_int(swap.getRegister(REGI_MAX_MEAT_PIECES), MAX_MEAT_PIECES);
+  load_meat_pieces_left();
+
+  //Send default values
+  swap.getRegister(REGI_BATTERY_VOLTAGE)->getData();
+  swap.getRegister(REGI_ACTION_EVENT)->getData();
+  swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
+  swap.getRegister(REGI_CONFIG)->getData();
   
   //Attach other devices
-  stepper.attach(14, 15, 18, 17, 16);
+  stepper.attach(14, 15, 18, 17, 16, MOTOR_DIRECTION);
   d1.attach(10, 10000, 3300);
   d2.attach(9, 10000, 5600);
   d3.attach(8, 10000, 10000);
@@ -96,200 +106,232 @@ void setup() {
   TA1CCR0 =  12500; //10hz
   TA1CCTL0 = CCIE;
   TA1CTL = TASSEL_2 + MC_1 + ID_3;
-  
-  swap.init(); // Initialize SWAP registers
-  swap.getRegister(REGI_PRODUCTCODE)->getData(); // Transmit product code
-  swap.getRegister(REGI_RESET_STATE)->getData();
-  swap.getRegister(REGI_DROP_MEAT_STATE)->getData();
-  swap.getRegister(REGI_PERCH_TRIGGERED)->getData();
-  swap.getRegister(REGI_BATT_VOLT)->getData();
-
   _BIS_SR(LPM0_bits + GIE); //LPM0_bits
 }
 
-//Start dropping meat
-const void set_push_meat(byte rId, byte *junk)
-{
-  Serial.println("Starting to push meat");  
-  memcpy(regTable[rId]->value, junk, sizeof(regTable[rId]->value));
-  int val = digitalRead(endstop_front_pin); //to check border case of push meat when already fuly forward
-  
-  if(!pushing_meat and !resetting and !val)
-  {    
-    pushing_meat = true;
-    clearing_meat = false;
-    device_reset = false;
-    meat_dropped = false;
-    swap.getRegister(REGI_DROP_MEAT_STATE)->getData();
-    swap.getRegister(REGI_RESET_STATE)->getData();
-    stepper.forward();
-  }
+const void action_callback(int action_id)
+{ 
+  switch (action_id)
+  {
+    case Stop:
+      stop_callback(); 
+      break;
+    case Reset:
+      reset_callback(); 
+      break;
+    case PrimeMeat:
+      prime_meat_callback(); 
+      break;
+    case DropMeat:
+      drop_meat_callback(); 
+      break;
+    default:
+      break;
+  }  
 }
 
-//Reset device
-const void set_reset(byte rId, byte *junk)
+void stop_callback()
 {  
-  Serial.println("Resetting");
-  memcpy(regTable[rId]->value, junk, sizeof(regTable[rId]->value));
+  stepper.stop();
+  feeder_state = Stopped;
+  swap.getRegister(REGI_ACTION_EVENT)->getData();
+}
+
+void reset_callback()
+{
   int val = digitalRead(endstop_back_pin); //to check border case of reset when already reset
   
-  if(!resetting and !pushing_meat and !val)
+  if(!val)
   {    
-    resetting = true;
-    device_reset = false;
-    swap.getRegister(REGI_RESET_STATE)->getData();
     stepper.reverse();
+    feeder_state = ResetStarted;    
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
+  }
+  else
+  {
+    meat_pieces_left = MAX_MEAT_PIECES;
+    swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
   }
 }
 
-//Updates register whether feeder succeeded in dropping meat
-const void updt_drop_meat_state(byte rId)
+void prime_meat_callback()
 {
-  regTable[rId]->value[0] = meat_dropped;
+  int val = digitalRead(endstop_front_pin); //to check border case of reset when empty
+  
+  if(!val && meat_pieces_left > 0)
+  {    
+    stepper.forward();
+    feeder_state = PrimeMeatStarted;
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
+  }
 }
 
-//Updates register whether feeder successfully reset itself
-const void updt_reset_state(byte rId)
+void drop_meat_callback()
 {
-  regTable[rId]->value[0] = device_reset; 
-}
-
-//Send updated battery voltages to server
-const void set_req_batt_volt(byte rId, byte *junk)
-{
-  Serial.println("Requesting battery voltages");
-  memcpy(regTable[rId]->value, junk, sizeof(regTable[rId]->value));
-  swap.getRegister(REGI_BATT_VOLT)->getData();
-}
-
-//Updates register with battery cell voltages
-const void updt_batt_volt(byte rId)
-{
-  float d1_val = d1.read_voltage();
-  float d2_val = d2.read_voltage(); 
-  float d3_val = d3.read_voltage();
-  
-  float cell_1 = d1_val - d2_val;
-  float cell_2 = d2_val - d3_val;
-  float cell_3 = d3_val;
-    
-  Serial.print("Voltages: ");
-  Serial.print(d1_val);
-  Serial.print(", ");
-  Serial.print(d2_val);
-  Serial.print(", ");
-  Serial.print(d3_val);
-  Serial.println("");
-  
-  int cell_1_int = int(cell_1*100.0);
-  int cell_2_int = int(cell_2*100.0);
-  int cell_3_int = int(cell_3*100.0);
-  
-  regTable[rId]->value[0] = (cell_1_int >> 8) & 0xFF;
-  regTable[rId]->value[1] = cell_1_int & 0xFF;
-  
-  regTable[rId]->value[2] = (cell_2_int >> 8) & 0xFF;
-  regTable[rId]->value[3] = cell_2_int & 0xFF;
-  
-  regTable[rId]->value[4] = (cell_3_int >> 8) & 0xFF;
-  regTable[rId]->value[5] = cell_3_int & 0xFF;  
-}
-
-//Updates register with current perch triggered value
-const void updt_perch_triggered(byte rId)
-{
-  regTable[rId]->value[0] = perch_triggered;
+  if(feeder_state == PrimeMeatFinished && meat_pieces_left > 0)
+  {
+    feeder_state = DropMeatStarted;
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
+  }
 }
 
 //Called by pin interrupt when front endstop high
 void endstop_front_high()
 {
-  Serial.println("Front end stop activated");
-  
-  if(pushing_meat)
+  if(feeder_state == PrimeMeatStarted)
   {
     stepper.stop();
-    pushing_meat = false;
-    clearing_meat = true;
+    feeder_state = MeatEmpty;
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
 }
 
 //Called by pin interrupt when back endstop high
 void endstop_back_high()
-{
-  Serial.println("Back end stop activated");
-  
-  if(resetting)
+{  
+  if(feeder_state == ResetStarted)
   {
     stepper.stop();
-    resetting = false;
-    device_reset = true;
-    swap.getRegister(REGI_RESET_STATE)->getData(); //Send confirmation
+    feeder_state = ResetFinished;
+    
+    meat_pieces_left = MAX_MEAT_PIECES;
+    save_meat_pieces_left();
+    swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
+    
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
 }
+
+void perch_callback()
+{
+  REGISTER* reg = swap.getRegister(REGI_PERCH_EVENT);
+  int perch_fsr = analogRead(fsr_perch_pin);
+  
+  if(perch_state == PerchVacant && perch_fsr > PERCH_OCCUPIED_THRESH)
+  {
+    perch_state = PerchOccupied;    
+    reg->getData();
+  }
+  else if(perch_state == PerchOccupied && perch_fsr < (PERCH_OCCUPIED_THRESH - PERCH_VACANT_DIFF))
+  {
+    perch_state = PerchVacant;
+    reg->getData();
+  }
+}
+
+int num_plunger_tries = 0;
+int plunger_tries_thresh = 2;
+
+void meat_sensor_callback()
+{
+  int meat_fsr = analogRead(fsr_meat_pin);
+  
+  //Priming finished logic
+  if(feeder_state == PrimeMeatStarted && meat_fsr > abs(MEAT_LOADED_THRESH))
+  {    
+    stepper.stop();
+    feeder_state = PrimeMeatFinished;
+    swap.getRegister(REGI_ACTION_EVENT)->getData();
+  }
+  
+  //Meat dropping logic
+  if(feeder_state == DropMeatStarted)
+  {  
+    if(num_plunger_tries == 0 || (meat_fsr > (abs(MEAT_LOADED_THRESH) - abs(MEAT_DROPPED_DIFF)) && num_plunger_tries < plunger_tries_thresh))
+    {
+      plunger.push_down(2);
+      plunger.pull_up(3);
+      num_plunger_tries += 1;
+    }
+    else
+    {    
+        plunger.pull_up();
+        
+        feeder_state = DropMeatFinished;
+        num_plunger_tries = 0;
+        swap.getRegister(REGI_ACTION_EVENT)->getData();
+  
+        //Update and save num pieces of meat left
+        meat_pieces_left -= 1;
+        save_meat_pieces_left();
+        swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
+        
+        prime_meat_callback();
+    }
+  }
+}
+
+unsigned long bat_count = 0;
+unsigned long hb_count = 0;
+unsigned long BAT_NOTIF_THRESH = 6000; //60 seconds in hz
+unsigned long HB_INIT_THRESH = 500; //60 seconds in hz
+unsigned long HB_PULSE_THRESH = 6000; //60 seconds in hz
 
 // Interrupt routine, reads analogue force sensitive resitors and executes logic based on their values
 #pragma vector=TIMER1_A0_VECTOR
 __interrupt void Timer1_A0 (void)
-{  
-  /*    
-    MEAT
-  */
-  
-  int meat_fsr = analogRead(fsr_meat_pin);  
-  
-  //Meat sensing logic
-  if(pushing_meat and meat_fsr > MEAT_SENSED_THRESHOLD)
-  {    
-    stepper.stop();
-    pushing_meat = false;
-    clearing_meat = true;
-    Serial.println("Meat in place");
-  }
-  
-  //Meat clearing logic
-  if(clearing_meat)
+{
+  perch_callback();
+  meat_sensor_callback();
+
+  if(!stepper.is_active())
   {
-    if(meat_fsr < MEAT_CLEARED_THRESHOLD)
+    if(bat_count > BAT_NOTIF_THRESH)
     {
-      clearing_meat = false;
-      meat_dropped = true;
-      swap.getRegister(REGI_DROP_MEAT_STATE)->getData();
-      plunger.pull_up();
-      Serial.println("Meat cleared");
+      swap.getRegister(REGI_BATTERY_VOLTAGE)->getData();
+      bat_count = 0;
     }
-    else
+
+    if(hb_state == Init && hb_count > HB_INIT_THRESH)
     {
-      Serial.println("Attempting to clear meat");
-      plunger.push_down(2);
-      plunger.pull_up(3);
-      plunger.push_down(2);
-      plunger.pull_up(3);
+      swap.getRegister(REGI_HEART_BEAT)->getData();
+      hb_count = 0;
+    }
+    else if(hb_state == Pulse && hb_count > HB_PULSE_THRESH)
+    {
+      swap.getRegister(REGI_HEART_BEAT)->getData();
+      hb_count = 0;
     }
   }
   
-  /*    
-    PERCH
-  */
+  bat_count += 1;
+  hb_count += 1;
+}
+
+void save_meat_pieces_left()
+{
+  STORAGE nvMem;
+  uint8_t value[1];
+  value[0] = meat_pieces_left;
+
+  uint8_t def[1];
+  def[0] = 255;
+  nvMem.write(def, INFOMEM_SECTION_C, mpl_address, sizeof(def));
+  mpl_address = (mpl_address + 1) % mpl_address_max;
+  nvMem.write(value, INFOMEM_SECTION_C, mpl_address, sizeof(value));
+}
+
+//Assumes all eeprom bytes are 255 initially.
+void load_meat_pieces_left()
+{
+  STORAGE nvMem;
   
-  int perch_fsr = analogRead(fsr_perch_pin);
-  
-  if(!perch_triggered && perch_fsr > PERCH_TRIGGERED_THRESHOLD)
-  {  
-    Serial.println("Perch triggered");
-    perch_triggered = true;
-    swap.getRegister(REGI_PERCH_TRIGGERED)->getData();
+  for (int i = 0 ; i < mpl_address_max; i++) {
+    uint8_t value[1];
+    nvMem.read(value, INFOMEM_SECTION_C, i, sizeof(value));
+
+    if(value[0] != 255)
+    {
+      mpl_address = i;
+      meat_pieces_left = value[0];
+      break;
+    }
+    else if(value[0] == 0 && i >= (mpl_address_max - 1)) //no value loaded yet
+    {
+      meat_pieces_left = MAX_MEAT_PIECES;
+    }
   }
-  else if(perch_triggered && perch_fsr < PERCH_CLEAR_THRESHOLD)
-  {
-     Serial.println("Perch clear");
-     perch_triggered = false;
-     swap.getRegister(REGI_PERCH_TRIGGERED)->getData();
-  }    
 }
 
 void loop(){}
-
-
-
 
