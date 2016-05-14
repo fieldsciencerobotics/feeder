@@ -46,18 +46,17 @@ int MEAT_LOADED_THRESH = 200;
 int MEAT_DROPPED_DIFF = 100;
 int PERCH_OCCUPIED_THRESH = 2000;
 int PERCH_VACANT_DIFF = 2500;
-int MAX_MEAT_PIECES = 12;
+int MAX_MEAT_PIECES = 15;
 int MOTOR_DIRECTION = 1;
-
 
 const float MILLIVOLT = 1000.0;
 
 PerchEvent perch_state = PerchVacant;
 ActionEvent feeder_state = Stopped;
-HeartBeat hb_state = Init;
-uint8_t meat_pieces_left;
-int mpl_address = 0;
-int mpl_address_max = 128;
+HeartBeat hb_state = InitA;
+uint8_t meat_pieces_left = MAX_MEAT_PIECES;
+int address = 0;
+int address_max = 128;
 
 PololuStepper stepper;
 Plunger plunger;
@@ -86,13 +85,7 @@ void setup() {
   reg_to_int(swap.getRegister(REGI_PERCH_VACANT_DIFF), PERCH_VACANT_DIFF);
   reg_to_int(swap.getRegister(REGI_MOTOR_DIRECTION), MOTOR_DIRECTION);
   reg_to_int(swap.getRegister(REGI_MAX_MEAT_PIECES), MAX_MEAT_PIECES);
-  load_meat_pieces_left();
-
-  //Send default values
-  swap.getRegister(REGI_BATTERY_VOLTAGE)->getData();
-  swap.getRegister(REGI_ACTION_EVENT)->getData();
-  swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
-  swap.getRegister(REGI_CONFIG)->getData();
+  load_state(feeder_state, meat_pieces_left);
   
   //Attach other devices
   stepper.attach(14, 15, 18, 17, 16, MOTOR_DIRECTION);
@@ -103,7 +96,7 @@ void setup() {
   plunger.pull_up(2);
       
   //Setup timer for ADC call
-  TA1CCR0 =  12500; //10hz
+  TA1CCR0 =  12500; //  hz
   TA1CCTL0 = CCIE;
   TA1CTL = TASSEL_2 + MC_1 + ID_3;
   _BIS_SR(LPM0_bits + GIE); //LPM0_bits
@@ -124,7 +117,7 @@ const void action_callback(int action_id)
       break;
     case DropMeat:
       drop_meat_callback(); 
-      break;
+      break;    
     default:
       break;
   }  
@@ -134,6 +127,7 @@ void stop_callback()
 {  
   stepper.stop();
   feeder_state = Stopped;
+  save_state(feeder_state, meat_pieces_left);
   swap.getRegister(REGI_ACTION_EVENT)->getData();
 }
 
@@ -144,12 +138,14 @@ void reset_callback()
   if(!val)
   {    
     stepper.reverse();
-    feeder_state = ResetStarted;    
+    feeder_state = ResetStarted;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
   else
   {
     meat_pieces_left = MAX_MEAT_PIECES;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
   }
 }
@@ -162,6 +158,7 @@ void prime_meat_callback()
   {    
     stepper.forward();
     feeder_state = PrimeMeatStarted;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
 }
@@ -171,6 +168,7 @@ void drop_meat_callback()
   if(feeder_state == PrimeMeatFinished && meat_pieces_left > 0)
   {
     feeder_state = DropMeatStarted;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
 }
@@ -182,6 +180,7 @@ void endstop_front_high()
   {
     stepper.stop();
     feeder_state = MeatEmpty;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
 }
@@ -195,7 +194,7 @@ void endstop_back_high()
     feeder_state = ResetFinished;
     
     meat_pieces_left = MAX_MEAT_PIECES;
-    save_meat_pieces_left();
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
     
     swap.getRegister(REGI_ACTION_EVENT)->getData();
@@ -231,6 +230,7 @@ void meat_sensor_callback()
   {    
     stepper.stop();
     feeder_state = PrimeMeatFinished;
+    save_state(feeder_state, meat_pieces_left);
     swap.getRegister(REGI_ACTION_EVENT)->getData();
   }
   
@@ -245,17 +245,14 @@ void meat_sensor_callback()
     }
     else
     {    
-        plunger.pull_up();
-        
+        plunger.pull_up();        
         feeder_state = DropMeatFinished;
+        meat_pieces_left -= 1;
+        save_state(feeder_state, meat_pieces_left); //Update and save num pieces of meat left
+        
         num_plunger_tries = 0;
         swap.getRegister(REGI_ACTION_EVENT)->getData();
-  
-        //Update and save num pieces of meat left
-        meat_pieces_left -= 1;
-        save_meat_pieces_left();
         swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
-        
         prime_meat_callback();
     }
   }
@@ -263,16 +260,15 @@ void meat_sensor_callback()
 
 unsigned long bat_count = 0;
 unsigned long hb_count = 0;
-unsigned long BAT_NOTIF_THRESH = 6000; //60 seconds in hz
-unsigned long HB_INIT_THRESH = 500; //60 seconds in hz
-unsigned long HB_PULSE_THRESH = 6000; //60 seconds in hz
+unsigned long BAT_NOTIF_THRESH = 7500; //60 seconds in hz
+unsigned long HB_INIT_THRESH = 1250; //10 seconds in hz
 
 // Interrupt routine, reads analogue force sensitive resitors and executes logic based on their values
 #pragma vector=TIMER1_A0_VECTOR
-__interrupt void Timer1_A0 (void)
+__interrupt void Timer1_A0 (void) 
 {
   perch_callback();
-  meat_sensor_callback();
+  meat_sensor_callback();  
 
   if(!stepper.is_active())
   {
@@ -281,54 +277,55 @@ __interrupt void Timer1_A0 (void)
       swap.getRegister(REGI_BATTERY_VOLTAGE)->getData();
       bat_count = 0;
     }
-
-    if(hb_state == Init && hb_count > HB_INIT_THRESH)
+    
+    if (hb_state == InitA && hb_count > HB_INIT_THRESH)
     {
-      swap.getRegister(REGI_HEART_BEAT)->getData();
+      hb_state = InitB;
       hb_count = 0;
+      swap.getRegister(REGI_HEART_BEAT)->getData();
     }
-    else if(hb_state == Pulse && hb_count > HB_PULSE_THRESH)
+    else if (hb_state == InitB && hb_count > HB_INIT_THRESH)
     {
-      swap.getRegister(REGI_HEART_BEAT)->getData();
+      hb_state = InitA;
       hb_count = 0;
+      swap.getRegister(REGI_HEART_BEAT)->getData();
     }
   }
-  
-  bat_count += 1;
-  hb_count += 1;
+
+  hb_count++;
+  bat_count++;
 }
 
-void save_meat_pieces_left()
+void save_state(ActionEvent feeder_state, uint8_t meat_left)
 {
   STORAGE nvMem;
-  uint8_t value[1];
-  value[0] = meat_pieces_left;
+  uint8_t value[2];
+  value[0] = feeder_state;
+  value[1] = meat_left;
 
-  uint8_t def[1];
-  def[0] = 255;
-  nvMem.write(def, INFOMEM_SECTION_C, mpl_address, sizeof(def));
-  mpl_address = (mpl_address + 1) % mpl_address_max;
-  nvMem.write(value, INFOMEM_SECTION_C, mpl_address, sizeof(value));
+  uint8_t deflt[2];
+  deflt[0] = 255;
+  deflt[1] = 255;
+  nvMem.write(deflt, INFOMEM_SECTION_C, address, sizeof(value));
+  
+  address = (address + 2) % address_max;
+  nvMem.write(value, INFOMEM_SECTION_C, address, sizeof(value));
 }
 
-//Assumes all eeprom bytes are 255 initially.
-void load_meat_pieces_left()
+void load_state(ActionEvent &feeder_state, uint8_t &meat_left)
 {
   STORAGE nvMem;
   
-  for (int i = 0 ; i < mpl_address_max; i++) {
-    uint8_t value[1];
+  for (int i = 0 ; i < address_max; i+=2) {
+    uint8_t value[2];
     nvMem.read(value, INFOMEM_SECTION_C, i, sizeof(value));
 
     if(value[0] != 255)
     {
-      mpl_address = i;
-      meat_pieces_left = value[0];
+      address = i;
+      feeder_state = ActionEvent(value[0]);
+      meat_left = value[1];
       break;
-    }
-    else if(value[0] == 0 && i >= (mpl_address_max - 1)) //no value loaded yet
-    {
-      meat_pieces_left = MAX_MEAT_PIECES;
     }
   }
 }

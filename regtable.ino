@@ -91,7 +91,7 @@ static byte dt_meat_pieces_left[2];
 REGISTER reg_meat_pieces_left(dt_meat_pieces_left, sizeof(dt_meat_pieces_left), &send_meat_pieces_left, NULL);
 
 static byte dt_perch_event[2];
-REGISTER reg_perch_event(dt_perch_event, sizeof(dt_perch_event), &send_config, NULL);
+REGISTER reg_perch_event(dt_perch_event, sizeof(dt_perch_event), &send_perch_event, NULL);
 
 
 /**
@@ -203,8 +203,12 @@ const void set_max_meat_pieces(byte rId, byte *value)
 
 const void set_ack_heart_beat(byte rId, byte *value)
 {
-  hb_state = Pulse;
+  hb_state = Ack;
+  hb_count = 0;
+  memcpy(regTable[rId]->value, value, sizeof(regTable[rId]->value));
   swap.getRegister(REGI_HEART_BEAT)->getData();
+  swap.getRegister(REGI_ACTION_EVENT)->getData();
+  swap.getRegister(REGI_MEAT_PIECES_LEFT)->getData();
 }
 
 const void send_heart_beat(byte rId)
@@ -243,7 +247,7 @@ const void send_perch_event(byte rId)
 
 const void send_action_event(byte rId)
 {
-  int_to_reg(swap.getRegister(REGI_ACTION_EVENT), perch_state);
+  int_to_reg(swap.getRegister(REGI_ACTION_EVENT), feeder_state);
 }
 
 const void send_battery_voltage(byte rId)

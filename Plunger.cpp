@@ -26,7 +26,7 @@ SOFTWARE.
 #include "HardwareSerial.h"
 
 int const Plunger::down_pulse = 2300;
-int const Plunger::up_pulse = 1000;
+int const Plunger::up_pulse = 1100;
 int const Plunger::period = 20000;
 
 Plunger::Plunger()

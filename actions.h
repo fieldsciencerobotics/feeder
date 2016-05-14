@@ -18,7 +18,6 @@ enum ActionEvent {
   DropMeatFinished=6,
   MeatEmpty=7
 };
-//should be a get state
 
 enum PerchEvent {
   PerchVacant=0,
@@ -26,8 +25,9 @@ enum PerchEvent {
 };
 
 enum HeartBeat {
-  Init=0,
-  Pulse=1
+  InitA = 0,
+  InitB = 1,
+  Ack=2
 };
 
 
